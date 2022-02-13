@@ -1,0 +1,121 @@
+#!/bin/sh
+#set -e      # Abort upon error
+#set -x     # Print every command
+
+#######################################
+#   Description:
+#       Generate locale file with missing labels
+#   Usage:
+#       ./mkLangDiff
+#   Arguments:
+#        None!
+#   Returns:
+#       0 upon success
+#       >=1 upon error
+#######################################
+main() {
+    # Check if $USAGE is respected
+    readonly USAGE='Usage: ./mkLangDiff'
+    [ "$#" -ne 0 ] && err "Error: 0 argument(s) expected, $# received" && err "$USAGE" && return 1
+
+    readonly rc_path="$(mktemp -d)"
+    readonly langs="da_DK fi_FI nb_NO"
+
+    # Remove output dir
+    rm -rf rc_diffs && mkdir rc_diffs
+
+    # Fetch RC and plugins
+    printf 'Cloning Roundcube...\n'
+    git clone --depth 1 https://github.com/roundcube/roundcubemail.git "$rc_path/roundcube" >/dev/null 2>&1
+
+    printf 'Cloning third-party and custom plugins...\n'
+    git clone --depth 1 https://github.com/johndoh/roundcube-swipe "$rc_path/roundcube/plugins/swipe" >/dev/null 2>&1
+    git clone --depth 1 git@github.com:Fjordmail/RC-Plus.git "$rc_path/RC-Plus" >/dev/null 2>&1; mv "$rc_path/RC-Plus/plugins/x2fa" "$rc_path/roundcube/plugins"
+    git clone --depth 1 git@github.com:Fjordmail/RC-Plugin-Fjordmail.git "$rc_path/roundcube/plugins/fjordmail" >/dev/null 2>&1
+
+    # Fetch diffs
+    printf 'Generating diffs for core...\n'; core
+    printf 'Generating diffs for plugins...\n'; plugins
+
+    # Clean up
+    printf 'Cleaning up...\n'
+    rm -rf "$rc_path"
+    find . -depth -type d -print0 | xargs -0 rmdir 2>/dev/null # Remove all empty subdirectories
+
+    printf 'Done.\n'
+}
+
+core() {
+    # Make diffs
+    for lang in $langs; do
+        for f in csv2vcard labels messages timezones; do
+            mkdir -p "rc_diffs/program/localization/$lang"
+            file="$rc_path/roundcube/program/localization/$lang/$f.inc"
+            file_us="$rc_path/roundcube/program/localization/en_US/$f.inc"
+
+            # Check if file exists - if not: copy entire US file
+            [ ! -f "$file" ] \
+                && cp "$file_us" "rc_diffs/program/localization/$lang" \
+                && continue
+
+            loop 'program/localization/$lang/$f.inc'
+        done
+    done
+}
+
+plugins() {
+    # Make diffs
+    for lang in $langs; do
+        for plugin in archive attachment_reminder emoticons fjordmail managesieve markasjunk swipe x2fa zipdownload; do
+            mkdir -p "rc_diffs/plugins/$plugin/localization"
+            file="$rc_path/roundcube/plugins/$plugin/localization/$lang.inc"
+            file_us="$rc_path/roundcube/plugins/$plugin/localization/en_US.inc"
+
+            # Check if file exists - if not: copy entire US file
+            [ ! -f "$file" ] \
+                && cp "$file_us" "rc_diffs/plugins/$plugin/localization/$lang.inc" \
+                && continue
+
+            loop 'plugins/$plugin/localization/$lang.inc'
+        done
+    done
+}
+
+loop() {
+    incfile_path="$1"
+    incfile_dir="$(echo "$incfile_path" | rev | cut -d'/' -f2- | rev)"
+
+    while read line; do
+        # Make sur first char is a '$'
+        [ "$(printf %.1s "$line")" != "\$" ] && continue
+        
+        # Fetch label
+        label="$(printf '%s' "$line" | cut -d'=' -f1 | cut -d"'" -f2)"
+
+        grep "$label" "$file" >/dev/null
+        err_code="$?"
+        case `echo $err_code` in
+            0) # Found
+                #printf 'Skipping:\t\t%s\n' "$label"
+                ;;
+            1) # Not found
+                #printf 'Writing line: "%s"\n' "$line"
+                # Do not print array declarations
+                if ! echo "$line" | grep -q -E '\[\];|array\(\);'; then eval "printf '%s\\n' \"\$line\" >> \"rc_diffs/$incfile_path\""; fi
+                ;;
+            *) # Error
+                printf 'Err:\t\t\t%i\nLang:\t\t\t%s\nf:\t\t\t%s\nFile:\t\t\t%s\nFile_US:\t\t%s\nLine:\t\t\t%s\n' "$err_code" "$lang" "$f" "$file" "$file_us" "$line"
+                printf '(Error) Skipping:\t%s\n\n' "$label"
+                ;;
+        esac
+    done <"$file_us"
+}
+
+#######################################
+#   Print error message to stderr
+#   https://google.github.io/styleguide/shellguide.html
+#######################################
+err() { echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $*" >&2; }
+
+main "$@"; exit
+
